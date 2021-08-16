@@ -4,5 +4,15 @@ metadata:
   name: helloapp-sample
 spec:
   # Add fields here
-  image: nginx
-  size: 3
+  image: postgres:13@sha256:260a98d976574b439712c35914fdcb840755233f79f3e27ea632543f78b7a21e
+  size: 1
+  secretName: db
+  pvcName: db
+  db:
+    image: postgres:13@sha256:260a98d976574b439712c35914fdcb840755233f79f3e27ea632543f78b7a21e
+    secretName: db
+    pvcName: db
+  dbMigration:
+    image: quay
+    secretName: db
+    backOffLimit: 3

@@ -40,10 +40,15 @@ spec:
                 description: Foo is an example field of HelloApp. Edit helloapp_types.go
                   to remove/update Foo string `json:"foo,omitempty"`
                 type: string
+              pvcName:
+                type: string
+              secretName:
+                type: string
               size:
                 format: int32
                 type: integer
             required:
+            - image
             - size
             type: object
           status:

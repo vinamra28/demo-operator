@@ -20,17 +20,19 @@ import (
 	"context"
 
 	"github.com/prometheus/common/log"
-	a "k8s.io/api/apps/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/go-logr/logr"
-	appsv1 "github.com/vinamra28/demo-operator/api/v1"
+	apiv1 "github.com/vinamra28/demo-operator/api/v1"
 )
 
 // HelloAppReconciler reconciles a HelloApp object
@@ -56,7 +58,7 @@ type HelloAppReconciler struct {
 func (r *HelloAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = r.Log.WithValues("helloapp", req.NamespacedName)
 	log.Info("Processing HelloAppReconciler.")
-	helloApp := &appsv1.HelloApp{}
+	helloApp := &apiv1.HelloApp{}
 	err := r.Client.Get(ctx, req.NamespacedName, helloApp)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -70,8 +72,42 @@ func (r *HelloAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		log.Error(err, "Failed to get HelloApp")
 		return ctrl.Result{}, err
 	}
+
+	// check if secret already exists else create one secret
+	secretName := helloApp.Spec.SecretName
+	dbSecret := &corev1.Secret{}
+	err = r.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: helloApp.Namespace}, dbSecret)
+	if err != nil && errors.IsNotFound(err) {
+		res := r.createSecret(helloApp)
+		log.Info("Creating a new Secret", "Secret.Namespace", res.Namespace, "Secret.Name", res.Name)
+		err = r.Client.Create(ctx, res)
+		if err != nil {
+			log.Error(err, "Failed to create new Secret", "Secret.Namespace", res.Namespace, "Secret.Name", res.Name)
+			return ctrl.Result{}, err
+		}
+	} else if err != nil {
+		log.Error(err, "Failed to get Secret")
+		return ctrl.Result{}, err
+	}
+
+	ctrl.SetControllerReference(helloApp, dbSecret, r.Scheme)
+
+	pvc := r.createPVC(helloApp)
+	err = r.Client.Create(ctx, pvc)
+	if err != nil {
+		log.Error(err, "Failed to create new PVC", "PVC.Namespace", pvc.Namespace, "PVC.Name", pvc.Name)
+		return ctrl.Result{}, err
+	}
+
+	svc := r.createService(helloApp)
+	err = r.Client.Create(ctx, svc)
+	if err != nil {
+		log.Error(err, "Failed to create new SVC", "SVC.Namespace", svc.Namespace, "SVC.Name", svc.Name)
+		return ctrl.Result{}, err
+	}
+
 	// Check if the deployment already exists, if not create a new one
-	found := &a.Deployment{}
+	found := &appsv1.Deployment{}
 	err = r.Client.Get(ctx, types.NamespacedName{Name: helloApp.Name, Namespace: helloApp.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
 		dep := r.deployHelloApp(helloApp)
@@ -106,20 +142,63 @@ func (r *HelloAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // SetupWithManager sets up the controller with the Manager.
 func (r *HelloAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1.HelloApp{}).
+		For(&apiv1.HelloApp{}).
 		Complete(r)
 }
 
-func (c *HelloAppReconciler) deployHelloApp(ha *appsv1.HelloApp) *a.Deployment {
+func (c *HelloAppReconciler) createSecret(ha *apiv1.HelloApp) *corev1.Secret {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "db",
+			Namespace: ha.Namespace,
+			Labels: map[string]string{
+				"apps": "db",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"POSTGRES_DB":       "hub",
+			"POSTGRES_USER":     "postgres",
+			"POSTGRES_PASSWORD": "postgres",
+			"POSTGRES_PORT":     "5432",
+		},
+	}
+	ctrl.SetControllerReference(ha, secret, c.Scheme)
+	return secret
+}
+
+func (c *HelloAppReconciler) createPVC(ha *apiv1.HelloApp) *corev1.PersistentVolumeClaim {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "db",
+			Namespace: ha.Namespace,
+			Labels: map[string]string{
+				"apps": "db",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{"ReadWriteOnce"},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceName(corev1.ResourceStorage): resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+	ctrl.SetControllerReference(ha, pvc, c.Scheme)
+	return pvc
+}
+
+func (c *HelloAppReconciler) deployHelloApp(ha *apiv1.HelloApp) *appsv1.Deployment {
 	replicas := ha.Spec.Size
-	labels := map[string]string{"app": "mock-containers"}
+	labels := map[string]string{"app": "db"}
 	image := ha.Spec.Image
-	dep := &a.Deployment{
+	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ha.Name,
 			Namespace: ha.Namespace,
 		},
-		Spec: a.DeploymentSpec{
+		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
@@ -129,9 +208,71 @@ func (c *HelloAppReconciler) deployHelloApp(ha *appsv1.HelloApp) *a.Deployment {
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					Volumes: []corev1.Volume{
+						{
+							Name: "db",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "db",
+								},
+							},
+						},
+					},
 					Containers: []corev1.Container{{
-						Image: image,
-						Name:  ha.Name,
+						Image:           image,
+						Name:            ha.Name,
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Ports: []corev1.ContainerPort{
+							{
+								ContainerPort: 5432,
+								Protocol:      corev1.ProtocolTCP,
+							},
+						},
+						Env: []corev1.EnvVar{
+							{
+								Name: "POSTGRES_DB",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "db",
+										},
+										Key: "POSTGRES_DB",
+									},
+								},
+							},
+							{
+								Name: "POSTGRES_USER",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "db",
+										},
+										Key: "POSTGRES_USER",
+									},
+								},
+							},
+							{
+								Name: "POSTGRES_PASSWORD",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "db",
+										},
+										Key: "POSTGRES_PASSWORD",
+									},
+								},
+							},
+							{
+								Name:  "PGDATA",
+								Value: "/var/lib/postgresql/data/pgdata",
+							},
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "db",
+								MountPath: "/var/lib/postgresql/data",
+							},
+						},
 					}},
 				},
 			},
@@ -139,4 +280,31 @@ func (c *HelloAppReconciler) deployHelloApp(ha *appsv1.HelloApp) *a.Deployment {
 	}
 	ctrl.SetControllerReference(ha, dep, c.Scheme)
 	return dep
+}
+
+func (r *HelloAppReconciler) createService(helloApp *apiv1.HelloApp) *corev1.Service {
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "db",
+			Namespace: helloApp.Namespace,
+			Labels: map[string]string{
+				"app": "db",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app": "db",
+			},
+			Type: corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{
+				{
+					Port:       5432,
+					Protocol:   corev1.ProtocolTCP,
+					TargetPort: intstr.FromInt(5432),
+				},
+			},
+		},
+	}
+	return svc
 }

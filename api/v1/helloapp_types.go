@@ -30,8 +30,10 @@ type HelloAppSpec struct {
 
 	// Foo is an example field of HelloApp. Edit helloapp_types.go to remove/update
 	// Foo string `json:"foo,omitempty"`
-	Image string `json:"image,omitempty"`
-	Size  int32  `json:"size"`
+	Image      string `json:"image"`
+	Size       int32  `json:"size"`
+	SecretName string `json:"secretName,omitempty"`
+	PVCName    string `json:"pvcName,omitempty"`
 }
 
 // HelloAppStatus defines the observed state of HelloApp
